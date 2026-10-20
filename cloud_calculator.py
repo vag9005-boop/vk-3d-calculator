@@ -23,7 +23,8 @@ def load_filaments():
         rows = conn.execute(text(
             "SELECT id, material, color, price_per_gram FROM filament_spools ORDER BY id"
         )).fetchall()
-    return [{"id": r[0], "label": f"{r[1]} {r[2]} ({float(r[3])}₽/г)", "price": r[3]} for r in rows]
+    # Убираем цену из отображаемого названия, оставляем только материал и цвет
+    return [{"id": r[0], "label": f"{r[1]} {r[2]}", "price": r[3]} for r in rows]
 
 
 def get_raw_price(weight, print_time, price_per_gram):
