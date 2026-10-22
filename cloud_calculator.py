@@ -7,15 +7,21 @@ from cloud_database import get_cloud_engine
 
 st.set_page_config(page_title="Калькулятор 3D-печати", page_icon="💰", layout="centered")
 
-# Скрытые константы (пользователь их не видит)
+# ============================================================
+# ВНУТРЕННИЕ КОНСТАНТЫ (СКРЫТЫ ОТ КЛИЕНТА)
+# ============================================================
 DEFAULT_PRINTER_RATE = Decimal("55")
 LABOR_RATE = Decimal("55")
 POSTPROCESS_H = Decimal("0.2")
 MARGIN = Decimal("40")
 WASTE_FACTOR = Decimal("1.05")
 VK_DISCOUNT = Decimal("10")
+MIN_PRICE = Decimal("50")  # Минимальная стоимость
 
 
+# ============================================================
+# ЗАГРУЗКА ДАННЫХ
+# ============================================================
 def load_filaments():
     """Загружает список филаментов из облака."""
     engine = get_cloud_engine()
@@ -23,25 +29,42 @@ def load_filaments():
         rows = conn.execute(text(
             "SELECT id, material, color, price_per_gram FROM filament_spools ORDER BY id"
         )).fetchall()
-    # Убираем цену из отображаемого названия, оставляем только материал и цвет
     return [{"id": r[0], "label": f"{r[1]} {r[2]}", "price": r[3]} for r in rows]
 
 
-def get_raw_price(weight, print_time, price_per_gram):
-    """Считает цену без скидки и без округления."""
+# ============================================================
+# РАСЧЕТ (ЕДИНАЯ ФУНКЦИЯ)
+# ============================================================
+def calculate_final_price(weight, print_time, price_per_gram, is_vk_discount):
+    """
+    Считает итоговую цену с учетом скидки, минимальной стоимости и округления.
+    """
+    # 1. Себестоимость
     material_cost = weight * price_per_gram * WASTE_FACTOR
     machine_cost = print_time * DEFAULT_PRINTER_RATE
     labor_cost = POSTPROCESS_H * LABOR_RATE
     cost = material_cost + machine_cost + labor_cost
-    return cost * (Decimal("1") + MARGIN / Decimal("100"))
+
+    # 2. Наценка
+    price = cost * (Decimal("1") + MARGIN / Decimal("100"))
+
+    # 3. Скидка
+    if is_vk_discount:
+        price = price * (Decimal("1") - VK_DISCOUNT / Decimal("100"))
+
+    # 4. Минимальная цена (50₽)
+    if price < MIN_PRICE:
+        price = MIN_PRICE
+
+    # 5. Округление до 10₽ вверх
+    price = (price / Decimal("10")).to_integral_value(rounding=ROUND_CEILING) * Decimal("10")
+
+    return price.quantize(Decimal("0.01"))
 
 
-def format_price(price_decimal):
-    """Округляет до 10₽ вверх для красивого вывода."""
-    rounded = (price_decimal / Decimal("10")).to_integral_value(rounding=ROUND_CEILING) * Decimal("10")
-    return rounded.quantize(Decimal("0.01"))
-
-
+# ============================================================
+# ИНТЕРФЕЙС
+# ============================================================
 def main():
     st.title("💰 Калькулятор 3D-печати")
     st.caption("Рассчитайте примерную стоимость печати вашей модели")
@@ -59,61 +82,44 @@ def main():
     # 1. Параметры модели
     st.subheader("1. Параметры модели")
     c1, c2 = st.columns(2)
-    weight = c1.number_input("Вес изделия, г", min_value=1.0, value=50.0, step=1.0)
-    print_time = c2.number_input("Время печати, ч", min_value=0.1, value=3.0, step=0.1)
+    # Добавляем key, чтобы Streamlit точно отслеживал изменения
+    weight = c1.number_input("Вес изделия, г", min_value=1.0, value=50.0, step=1.0, key="calc_weight")
+    print_time = c2.number_input("Время печати, ч", min_value=0.1, value=3.0, step=0.1, key="calc_time")
 
     # 2. Материал
     st.subheader("2. Материал")
 
-    # Инициализируем session_state, если его еще нет
-    if "selected_filament_id" not in st.session_state:
-        st.session_state.selected_filament_id = filaments[0]["id"]
+    # Просто список строк. Без ID и session_state.
+    # Streamlit отлично запоминает выбранную строку.
+    labels = [f["label"] for f in filaments]
+    selected_label = st.selectbox("Выберите тип филамента", options=labels, key="calc_filament")
 
-    # Создаем словарь ID -> Название
-    options_dict = {f["id"]: f["label"] for f in filaments}
-
-    # Находим индекс текущего выбранного ID
-    current_index = list(options_dict.keys()).index(st.session_state.selected_filament_id)
-
-    # Виджет выбора
-    selected_id = st.selectbox(
-        "Выберите тип филамента",
-        options=list(options_dict.keys()),
-        index=current_index,
-        format_func=lambda x: options_dict[x],
-        key="filament_widget"
-    )
-
-    # Если выбор изменился — обновляем session_state и принудительно перезапускаем страницу
-    if selected_id != st.session_state.selected_filament_id:
-        st.session_state.selected_filament_id = selected_id
-        st.rerun()
-
-    # Берем цену по ID из session_state
-    price_per_gram = Decimal(
-        str(next(f["price"] for f in filaments if f["id"] == st.session_state.selected_filament_id)))
+    # Находим цену по выбранному названию
+    selected_filament = next(f for f in filaments if f["label"] == selected_label)
+    price_per_gram = Decimal(str(selected_filament["price"]))
 
     # 3. Скидка
     st.subheader("3. Скидка")
-    has_vk = st.checkbox("🎁 Я подписчик группы ВКонтакте (скидка 10%)", value=False)
+    has_vk = st.checkbox("🎁 Я подписчик группы ВКонтакте (скидка 10%)", value=False, key="calc_vk")
 
     st.divider()
 
-    # Считаем цены
-    raw_price_normal = get_raw_price(Decimal(str(weight)), Decimal(str(print_time)), price_per_gram)
+    # Расчет
+    price_normal = calculate_final_price(
+        Decimal(str(weight)), Decimal(str(print_time)), price_per_gram, False
+    )
+    price_discount = calculate_final_price(
+        Decimal(str(weight)), Decimal(str(print_time)), price_per_gram, True
+    )
 
-    # Скидка считается от "сырой" цены
-    discount_amount = raw_price_normal * (VK_DISCOUNT / Decimal("100"))
-    raw_price_discount = raw_price_normal - discount_amount
-
-    # Вывод результата
+    # Вывод
     if has_vk:
         st.markdown(
-            f"### Итоговая стоимость: **{format_price(raw_price_discount)} ₽**\n"
-            f"~~Обычная цена: {format_price(raw_price_normal)} ₽~~ &nbsp; 🎁 Скидка ВК: 10%"
+            f"### Итоговая стоимость: **{price_discount} ₽**\n"
+            f"~~Обычная цена: {price_normal} ₽~~ &nbsp; 🎁 Скидка ВК: 10%"
         )
     else:
-        st.markdown(f"### Итоговая стоимость: **{format_price(raw_price_normal)} ₽**")
+        st.markdown(f"### Итоговая стоимость: **{price_normal} ₽**")
 
     # Дисклеймер
     st.divider()
